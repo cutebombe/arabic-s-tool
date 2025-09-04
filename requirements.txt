@@ -1,0 +1,30 @@
+# requirements.txt
+
+# Core dependencies
+gradio>=4.0.0
+pillow>=10.0.0
+numpy>=1.24.0
+moviepy>=1.0.3
+
+# Arabic text processing
+arabic-reshaper>=3.0.0
+python-bidi>=0.4.2
+
+# AI and transcription
+openai-whisper>=20231117
+torch>=2.0.0
+
+# Video processing
+ffmpeg-python>=0.2.0
+
+# File formats
+srt>=3.5.0
+
+# Web requests
+requests>=2.31.0
+
+# Data processing
+pandas>=2.0.0
+
+# Optional: faster processing
+# torch-audio>=2.0.0  # Uncomment for better audio processing
