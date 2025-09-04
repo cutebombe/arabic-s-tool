@@ -359,3 +359,512 @@ class TextRenderer:
             current_y += line_height
         
         return img
+# yellow.py
+import re
+import csv
+import json
+from typing import List, Dict, Optional, Tuple, Any
+from dataclasses import dataclass, asdict
+from pathlib import Path
+import logging
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class YellowWord:
+    """Represents a yellow-marked word with its metadata"""
+    word: str
+    original_markup: str
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
+    sequence: Optional[int] = None
+    source_line_index: Optional[int] = None
+    confidence: Optional[float] = None
+    
+    def dict(self) -> Dict[str, Any]:
+        """Convert to dictionary"""
+        return asdict(self)
+
+class YellowWordParser:
+    """Parses yellow word markup from text"""
+    
+    def __init__(self):
+        # Define supported markup patterns
+        self.patterns = [
+            (r'\[\[y\]\](.*?)\[\[/y\]\]', '[[y]]{}[[/y]]'),  # [[y]]word[[/y]]
+            (r'<y>(.*?)</y>', '<y>{}</y>'),                    # <y>word</y>
+            (r'\{y\}(.*?)\{/y\}', '{{y}}{{/y}}'),             # {y}word{/y}
+        ]
+    
+    def get_supported_patterns(self) -> List[str]:
+        """Get list of supported markup patterns"""
+        return [pattern[1] for pattern in self.patterns]
+    
+    def parse_text(self, text: str) -> List[YellowWord]:
+        """Parse text and extract yellow-marked words"""
+        yellow_words = []
+        processed_text = text
+        
+        for pattern_regex, pattern_format in self.patterns:
+            matches = list(re.finditer(pattern_regex, processed_text, re.IGNORECASE))
+            
+            for match in matches:
+                word = match.group(1).strip()
+                if word:
+                    yellow_word = YellowWord(
+                        word=word,
+                        original_markup=match.group(0)
+                    )
+                    yellow_words.append(yellow_word)
+        
+        # Add sequence numbers
+        for i, yellow_word in enumerate(yellow_words):
+            yellow_word.sequence = i + 1
+        
+        return yellow_words
+    
+    def remove_markup(self, text: str) -> str:
+        """Remove yellow markup from text, keeping only the words"""
+        clean_text = text
+        
+        for pattern_regex, _ in self.patterns:
+            clean_text = re.sub(pattern_regex, r'\1', clean_text, flags=re.IGNORECASE)
+        
+        return clean_text
+    
+    def get_word_positions(self, text: str) -> List[Dict[str, Any]]:
+        """Get positions of yellow words in the clean text"""
+        clean_text = self.remove_markup(text)
+        yellow_words = self.parse_text(text)
+        word_positions = []
+        
+        clean_words = clean_text.split()
+        
+        for yellow_word in yellow_words:
+            # Find the position of this word in the clean text
+            for i, clean_word in enumerate(clean_words):
+                if clean_word.strip() == yellow_word.word.strip():
+                    word_positions.append({
+                        'word': yellow_word.word,
+                        'position': i,
+                        'yellow_word': yellow_word
+                    })
+                    break
+        
+        return word_positions
+
+class YellowWordTracker:
+    """Tracks yellow words timing and exports data"""
+    
+    def __init__(self):
+        self.tracked_words: List[YellowWord] = []
+        self.export_settings = {
+            'csv_columns': ['sequence', 'word', 'start_time', 'end_time', 'source_line_index'],
+            'include_confidence': False,
+            'timestamp_format': 'seconds'  # 'seconds' or 'timecode'
+        }
+    
+    def add_word_timing(
+        self,
+        yellow_word: YellowWord,
+        start_time: float,
+        end_time: float,
+        source_line_index: Optional[int] = None,
+        confidence: Optional[float] = None
+    ) -> None:
+        """Add timing information to a yellow word"""
+        yellow_word.start_time = start_time
+        yellow_word.end_time = end_time
+        yellow_word.source_line_index = source_line_index
+        yellow_word.confidence = confidence
+        
+        if yellow_word not in self.tracked_words:
+            self.tracked_words.append(yellow_word)
+    
+    def distribute_timing(
+        self,
+        words: List[str],
+        yellow_positions: List[int],
+        segment_start: float,
+        segment_end: float,
+        yellow_words: List[YellowWord]
+    ) -> None:
+        """Distribute timing across words in a segment"""
+        if not words or not yellow_positions:
+            return
+        
+        segment_duration = segment_end - segment_start
+        word_duration = segment_duration / len(words)
+        
+        yellow_idx = 0
+        for i, word in enumerate(words):
+            if i in yellow_positions and yellow_idx < len(yellow_words):
+                word_start = segment_start + (i * word_duration)
+                word_end = word_start + word_duration
+                
+                self.add_word_timing(
+                    yellow_words[yellow_idx],
+                    word_start,
+                    word_end,
+                    confidence=0.8  # Default confidence for distributed timing
+                )
+                yellow_idx += 1
+    
+    def format_timestamp(self, seconds: float, format_type: str = 'seconds') -> str:
+        """Format timestamp according to specified format"""
+        if format_type == 'timecode':
+            hours = int(seconds // 3600)
+            minutes = int((seconds % 3600) // 60)
+            secs = seconds % 60
+            return f"{hours:02d}:{minutes:02d}:{secs:06.3f}"
+        else:
+            return f"{seconds:.3f}"
+    
+    def export_to_csv(
+        self,
+        output_path: str,
+        columns: Optional[List[str]] = None
+    ) -> bool:
+        """Export tracked words to CSV"""
+        try:
+            if columns is None:
+                columns = self.export_settings['csv_columns']
+            
+            with open(output_path, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                
+                # Write header
+                writer.writerow(columns)
+                
+                # Write data
+                for word in self.tracked_words:
+                    row = []
+                    for col in columns:
+                        if col == 'start_time' and word.start_time is not None:
+                            row.append(self.format_timestamp(
+                                word.start_time, 
+                                self.export_settings['timestamp_format']
+                            ))
+                        elif col == 'end_time' and word.end_time is not None:
+                            row.append(self.format_timestamp(
+                                word.end_time, 
+                                self.export_settings['timestamp_format']
+                            ))
+                        else:
+                            row.append(getattr(word, col, ''))
+                    writer.writerow(row)
+            
+            logger.info(f"Exported {len(self.tracked_words)} yellow words to {output_path}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to export CSV: {e}")
+            return False
+    
+    def export_to_json(
+        self,
+        output_path: str,
+        include_settings: bool = True
+    ) -> bool:
+        """Export tracked words and settings to JSON"""
+        try:
+            export_data = {
+                'yellow_words': [word.dict() for word in self.tracked_words],
+                'summary': {
+                    'total_words': len(self.tracked_words),
+                    'export_timestamp': datetime.now().isoformat(),
+                    'average_duration': self._calculate_average_duration()
+                }
+            }
+            
+            if include_settings:
+                export_data['export_settings'] = self.export_settings
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(export_data, f, indent=2, ensure_ascii=False)
+            
+            logger.info(f"Exported yellow word data to {output_path}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to export JSON: {e}")
+            return False
+    
+    def _calculate_average_duration(self) -> Optional[float]:
+        """Calculate average duration of yellow words"""
+        durations = []
+        for word in self.tracked_words:
+            if word.start_time is not None and word.end_time is not None:
+                durations.append(word.end_time - word.start_time)
+        
+        return sum(durations) / len(durations) if durations else None
+    
+    def get_statistics(self) -> Dict[str, Any]:
+        """Get statistics about tracked yellow words"""
+        total_duration = 0
+        words_with_timing = 0
+        confidence_scores = []
+        
+        for word in self.tracked_words:
+            if word.start_time is not None and word.end_time is not None:
+                total_duration += word.end_time - word.start_time
+                words_with_timing += 1
+            
+            if word.confidence is not None:
+                confidence_scores.append(word.confidence)
+        
+        return {
+            'total_words': len(self.tracked_words),
+            'words_with_timing': words_with_timing,
+            'total_duration': total_duration,
+            'average_duration': total_duration / words_with_timing if words_with_timing > 0 else 0,
+            'average_confidence': sum(confidence_scores) / len(confidence_scores) if confidence_scores else None,
+            'min_confidence': min(confidence_scores) if confidence_scores else None,
+            'max_confidence': max(confidence_scores) if confidence_scores else None
+        }
+    
+    def clear(self) -> None:
+        """Clear all tracked words"""
+        self.tracked_words.clear()
+    
+    def set_export_settings(self, **kwargs) -> None:
+        """Update export settings"""
+        self.export_settings.update(kwargs)
+        # process.py
+import os
+import tempfile
+import logging
+from pathlib import Path
+from typing import Dict, Any, Optional, List, Tuple
+import numpy as np
+import moviepy.editor as mpy
+import whisper
+import srt
+from PIL import Image
+from datetime import datetime, timedelta
+
+from text_render import TextRenderer
+from yellow import YellowWordParser, YellowWordTracker, YellowWord
+
+logger = logging.getLogger(__name__)
+
+class VideoProcessor:
+    """Main video processing pipeline"""
+    
+    def __init__(self, text_renderer: TextRenderer, yellow_tracker: YellowWordTracker):
+        self.text_renderer = text_renderer
+        self.yellow_tracker = yellow_tracker
+        self.yellow_parser = YellowWordParser()
+        
+        # Initialize Whisper model
+        self.whisper_model = None
+        
+    def load_whisper_model(self, model_size: str = "medium") -> None:
+        """Load Whisper model for transcription"""
+        try:
+            logger.info(f"Loading Whisper model: {model_size}")
+            self.whisper_model = whisper.load_model(model_size)
+            logger.info("Whisper model loaded successfully")
+        except Exception as e:
+            logger.error(f"Failed to load Whisper model: {e}")
+            raise
+    
+    def process(
+        self,
+        input_video: Optional[str] = None,
+        input_captions: Optional[str] = None,
+        input_text: Optional[str] = None,
+        **params
+    ) -> Dict[str, Any]:
+        """Main processing pipeline"""
+        
+        try:
+            logger.info("Starting video processing pipeline")
+            
+            # Create temporary directory
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
+                
+                # Step 1: Handle inputs
+                video_clip = None
+                if input_video:
+                    video_clip = mpy.VideoFileClip(input_video)
+                    logger.info(f"Loaded video: {video_clip.w}x{video_clip.h}, {video_clip.duration}s")
+                
+                # Step 2: Get or generate subtitles
+                subtitle_segments = []
+                if input_captions:
+                    subtitle_segments = self._load_captions(input_captions)
+                elif input_text:
+                    # Use provided text directly
+                    subtitle_segments = self._text_to_segments(input_text, video_clip.duration if video_clip else 10.0)
+                elif video_clip:
+                    # Extract audio and transcribe
+                    subtitle_segments = self._transcribe_video(video_clip, temp_path)
+                else:
+                    raise ValueError("No input provided")
+                
+                logger.info(f"Generated {len(subtitle_segments)} subtitle segments")
+                
+                # Step 3: Process yellow words
+                all_yellow_words = []
+                processed_segments = []
+                
+                for i, segment in enumerate(subtitle_segments):
+                    # Parse yellow words from this segment
+                    yellow_words = self.yellow_parser.parse_text(segment['text'])
+                    clean_text = self.yellow_parser.remove_markup(segment['text'])
+                    
+                    # Update segment with clean text
+                    processed_segment = segment.copy()
+                    processed_segment['text'] = clean_text
+                    processed_segment['yellow_words'] = yellow_words
+                    processed_segment['words'] = clean_text.split()
+                    
+                    # Distribute timing for yellow words
+                    if yellow_words:
+                        yellow_positions = self._find_yellow_positions(processed_segment['words'], yellow_words)
+                        self.yellow_tracker.distribute_timing(
+                            processed_segment['words'],
+                            yellow_positions,
+                            segment['start'],
+                            segment['end'],
+                            yellow_words
+                        )
+                        all_yellow_words.extend(yellow_words)
+                    
+                    processed_segments.append(processed_segment)
+                
+                # Step 4: Create output video/image
+                output_files = {}
+                
+                if video_clip:
+                    output_video = self._create_subtitled_video(
+                        video_clip, processed_segments, temp_path, **params
+                    )
+                    output_files['output_video'] = output_video
+                else:
+                    # Create preview image
+                    preview_image = self._create_preview_image(
+                        processed_segments[0]['text'] if processed_segments else "Sample Text",
+                        **params
+                    )
+                    output_files['preview_image'] = preview_image
+                
+                # Step 5: Export yellow word data
+                if all_yellow_words:
+                    csv_file = temp_path / "yellow_words.csv"
+                    json_file = temp_path / "yellow_data.json"
+                    
+                    self.yellow_tracker.export_to_csv(str(csv_file))
+                    self.yellow_tracker.export_to_json(str(json_file))
+                    
+                    output_files['csv_file'] = str(csv_file)
+                    output_files['json_file'] = str(json_file)
+                
+                # Step 6: Generate summary
+                summary = {
+                    'processing_time': datetime.now().isoformat(),
+                    'segments_processed': len(processed_segments),
+                    'yellow_words_found': len(all_yellow_words),
+                    'yellow_statistics': self.yellow_tracker.get_statistics(),
+                    'settings_used': params,
+                    'video_info': {
+                        'width': video_clip.w if video_clip else None,
+                        'height': video_clip.h if video_clip else None,
+                        'duration': video_clip.duration if video_clip else None,
+                        'fps': video_clip.fps if video_clip else None
+                    }
+                }
+                
+                output_files['summary'] = summary
+                
+                logger.info("Video processing completed successfully")
+                return output_files
+                
+        except Exception as e:
+            logger.error(f"Processing failed: {e}")
+            raise
+    
+    def _load_captions(self, captions_file: str) -> List[Dict[str, Any]]:
+        """Load captions from SRT or other caption files"""
+        segments = []
+        
+        try:
+            with open(captions_file, 'r', encoding='utf-8') as f:
+                if captions_file.endswith('.srt'):
+                    subtitles = list(srt.parse(f.read()))
+                    for sub in subtitles:
+                        segments.append({
+                            'start': sub.start.total_seconds(),
+                            'end': sub.end.total_seconds(),
+                            'text': sub.content.strip()
+                        })
+                else:
+                    # Handle plain text files
+                    content = f.read().strip()
+                    segments.append({
+                        'start': 0.0,
+                        'end': 10.0,  # Default duration
+                        'text': content
+                    })
+            
+            logger.info(f"Loaded {len(segments)} caption segments from {captions_file}")
+            return segments
+            
+        except Exception as e:
+            logger.error(f"Failed to load captions: {e}")
+            raise
+    
+    def _text_to_segments(self, text: str, duration: float) -> List[Dict[str, Any]]:
+        """Convert text to subtitle segments"""
+        # Split text into sentences or chunks
+        sentences = [s.strip() for s in text.split('.') if s.strip()]
+        if not sentences:
+            sentences = [text.strip()]
+        
+        segments = []
+        segment_duration = duration / len(sentences)
+        
+        for i, sentence in enumerate(sentences):
+            start_time = i * segment_duration
+            end_time = start_time + segment_duration
+            
+            segments.append({
+                'start': start_time,
+                'end': end_time,
+                'text': sentence
+            })
+        
+        return segments
+    
+    def _transcribe_video(self, video_clip: mpy.VideoFileClip, temp_path: Path) -> List[Dict[str, Any]]:
+        """Transcribe video audio using Whisper"""
+        
+        if not self.whisper_model:
+            self.load_whisper_model()
+        
+        # Extract audio
+        audio_file = temp_path / "audio.wav"
+        video_clip.audio.write_audiofile(str(audio_file), verbose=False, logger=None)
+        
+        # Transcribe with word timestamps
+        logger.info("Transcribing audio...")
+        result = self.whisper_model.transcribe(
+            str(audio_file),
+            language="ar",
+            word_timestamps=True,
+            fp16=False
+        )
+        
+        segments = []
+        for segment in result["segments"]:
+            segments.append({
+                'start': segment["start"],
+                'end': segment["end"],
+                'text': segment["text"].strip(),
+                'words': segment.get("words", [])
+            })
+        
+        logger.info(f"
